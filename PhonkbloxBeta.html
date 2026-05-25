@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Phonkblox</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
+        canvas { display: block; }
+        #interfaz {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.6);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none; /* No interrumpe los clics del juego */
+        }
+        h1 { margin: 0 0 5px 0; font-size: 1.2rem; color: #f1c40f; }
+    </style>
+
+    <!-- 1. LIBRERÍAS EXTERNAS: Motor 3D (Three.js) y Sistema Multijugador (Socket.io) -->
+    <script src="https://cloudflare.com"></script>
+    <script src="https://socket.io"></script>
+</head>
+<body>
+
+    <!-- Panel de información en pantalla -->
+    <div id="interfaz">
+        <h1>Retro-Roblox Web</h1>
+        <p style="margin:0; font-size:0.9rem;">Controles: <b>W, A, S, D</b> para moverte.</p>
+        <p id="estado-conexion" style="margin:5px 0 0 0; font-size:0.8rem; color:#ff4757;">Conectando al servidor multijugador...</p>
+    </div>
+
+<script>
+    // ==========================================
+    // 2. CONFIGURACIÓN DEL MOTOR GRÁFICO 3D
+    // ==========================================
+    const escena = new THREE.Scene();
+    escena.background = new THREE.Color(0x7ec0ee); // Cielo azul clásico
+
+    const camara = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderizador = new THREE.WebGLRenderer({ antialias: true });
+    renderizador.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderizador.domElement);
+
+    // Iluminación ambiental y solar
+    const luzAmbiente = new THREE.AmbientLight(0xffffff, 0.6);
+    escena.add(luzAmbiente);
+    const luzSol = new THREE.DirectionalLight(0xffffff, 0.8);
+    luzSol.position.set(10, 20, 15);
+    escena.add(luzSol);
+
+    // Baseplate (Suelo verde clásico de Roblox)
+    const geoSuelo = new THREE.BoxGeometry(200, 1, 200);
+    const matSuelo = new THREE.MeshStandardMaterial({ color: 0x27ae60 });
+    const baseplate = new THREE.Mesh(geoSuelo, matSuelo);
+    baseplate.position.y = -0.5;
+    escena.add(baseplate);
+
+    // Diccionario local para guardar los Avatares de otros jugadores que se conecten
+    const otrosJugadores = {};
+
+    // ==========================================
+    // 3. CREACIÓN DE TU PROPIO AVATAR (NOOB CLÁSICO)
+    // ==========================================
+    function crearPersonajeNoob(colorTorso = 0x0055ff) {
+        const grupoNoob = new THREE.Group();
+
+        // Cabeza (Amarilla)
+        const geoCabeza = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+        const matCabeza = new THREE.MeshStandardMaterial({ color: 0xffd32a });
+        const cabeza = new THREE.Mesh(geoCabeza, matCabeza);
+        cabeza.position.y = 2.1;
+        grupoNoob.add(cabeza);
+
+        // Torso (Azul o color personalizado)
+        const geoTorso = new THREE.BoxGeometry(2, 2, 1);
+        const matTorso = new THREE.MeshStandardMaterial({ color: colorTorso });
+        const torso = new THREE.Mesh(geoTorso, matTorso);
+        torso.position.y = 0.5;
+        grupoNoob.add(torso);
+
+        // Brazos (Amarillos)
+        const geoBrazo = new THREE.BoxGeometry(0.8, 2, 0.8);
+        const matBrazo = new THREE.MeshStandardMaterial({ color: 0xffd32a });
+        
+        const brazoIzq = new THREE.Mesh(geoBrazo, matBrazo);
+        brazoIzq.position.set(-1.5, 0.5, 0);
+        grupoNoob.add(brazoIzq);
+
+        const brazoDer = brazoIzq.clone();
+        brazoDer.position.x = 1.5;
+        grupoNoob.add(brazoDer);
+
+        // Piernas (Verde claro / Amarillo verdoso)
+        const geoPierna = new THREE.BoxGeometry(0.9, 2, 0.9);
+        const matPierna = new THREE.MeshStandardMaterial({ color: 0x0be881 });
+
+        const piernaIzq = new THREE.Mesh(geoPierna, matPierna);
+        piernaIzq.position.set(-0.5, -1.5, 0);
+        grupoNoob.add(piernaIzq);
+
+        const piernaDer = piernaIzq.clone();
+        piernaDer.position.x = 0.5;
+        grupoNoob.add(piernaDer);
+
+        return grupoNoob;
+    }
+
+    // Generamos nuestro avatar con un torso azul
+    const miAvatar = crearPersonajeNoob(0x0055ff);
+    miAvatar.position.set(Math.random() * 10 - 5, 2.5, Math.random() * 10 - 5); // Posición inicial aleatoria
+    escena.add(miAvatar);
+
+    // Cámara en tercera persona
+    camara.position.set(0, 12, 18);
+    camara.lookAt(miAvatar.position);
+
+    // CONTROLES DE TECLADO
+    const teclas = { w: false, a: false, s: false, d: false };
+    const velocidad = 0.3;
+
+    window.addEventListener('keydown', (e) => { if (e.key.toLowerCase() in teclas) teclas[e.key.toLowerCase()] = true; });
+    window.addEventListener('keyup', (e) => { if (e.key.toLowerCase() in teclas) teclas[e.key.toLowerCase()] = false; });
+
+    // ==========================================
+    // 4. CONEXIÓN MULTIJUGADOR EN TIEMPO REAL
+    // ==========================================
+    // Usamos un servidor público de relay gratuito para conectar los index.html entre sí
+    const socket = io("https://onrender.com", { transports: ['websocket'] });
+    const textoEstado = document.getElementById('estado-conexion');
+
+    socket.on('connect', () => {
+        textoEstado.textContent = "¡Conectado en línea con otros jugadores!";
+        textoEstado.style.color = "#2ed573";
+
+        // Al entrar, le enviamos nuestra posición inicial al servidor público
+        socket.emit('join-room', {
+            sala: 'roblox-antiguo-web-001', // Identificador de la sala de juego
+            x: miAvatar.position.x,
+            z: miAvatar.position.z
+        });
+    });
+
+    // Escuchar cuando se conecta un nuevo compañero a la web
+    socket.on('player-joined', (datos) => {
+        if (datos.id !== socket.id && !otrosJugadores[datos.id]) {
+            // Le creamos un avatar Noob con torso rojo para diferenciarlo
+            const compañero = crearPersonajeNoob(0xff3f34);
+            compañero.position.set(datos.x, 2.5, datos.z);
+            escena.add(compañero);
+            otrosJugadores[datos.id] = compañero;
+        }
+    });
+
+    // Escuchar cuando los otros jugadores se están moviendo en sus pantallas
+    socket.on('player-moved', (datos) => {
+        if (otrosJugadores[datos.id]) {
+            otrosJugadores[datos.id].position.x = datos.x;
+            otrosJugadores[datos.id].position.z = datos.z;
+        }
+    });
+
+    // Eliminar el personaje de alguien si cierra la pestaña
+    socket.on('player-left', (id) => {
+        if (otrosJugadores[id]) {
+            escena.remove(otrosJugadores[id]);
+            delete otrosJugadores[id];
+        }
+    });
+
+    // ==========================================
+    // 5. BUCLE PRINCIPAL DE JUEGO (RENDER LOOP)
+    // ==========================================
+    let haCambiadoPosicion = false;
+
+    function bucleJuego() {
+        requestAnimationFrame(bucleJuego);
+
+        haCambiadoPosicion = false;
+
+        // Procesar movimientos locales
+        if (teclas.w) { miAvatar.position.z -= velocidad; haCambiadoPosicion = true; }
+        if (teclas.s) { miAvatar.position.z += velocidad; haCambiadoPosicion = true; }
+        if (teclas.a) { miAvatar.position.x -= velocidad; haCambiadoPosicion = true; }
+        if (teclas.d) { miAvatar.position.x += velocidad; haCambiadoPosicion = true; }
+
+        // Si nos movimos, avisamos de inmediato al servidor para actualizar a los demás
+        if (haCambiadoPosicion && socket.connected) {
+            socket.emit('move', {
+                x: miAvatar.position.x,
+                z: miAvatar.position.z
+            });
+        }
+
+        // Suavizar seguimiento de cámara detrás del jugador
+        camara.position.x = miAvatar.position.x;
+        camara.position.z = miAvatar.position.z + 18;
+        camara.lookAt(miAvatar.position);
+
+        renderizador.render(escena, camara);
+    }
+
+    bucleJuego();
+
+    // Redimensionar ventana
+    window.addEventListener('resize', () => {
+        camara.aspect = window.innerWidth / window.innerHeight;
+        camara.updateProjectionMatrix();
+        renderizador.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+
+</body>
+</html>
